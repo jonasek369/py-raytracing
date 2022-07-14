@@ -1,5 +1,4 @@
 import math
-import random
 
 import pygame
 from numba import njit
@@ -25,12 +24,13 @@ def angle_to_vec(angle):
 
 
 class Ray:
-    def __init__(self, pos: vec2, angle: float or vec2):
+    def __init__(self, pos: vec2, angle: float or vec2, bounced_from=None):
         self.position = pos
         if isinstance(angle, vec2):
             self.direction = angle
         else:
             self.direction = angle_to_vec(angle)
+        self.bounced_from = bounced_from
 
     def get_point(self, distance: int = 1) -> vec2:
         x = self.position.x + self.direction.x * distance
@@ -38,9 +38,12 @@ class Ray:
         return vec2(x, y)
 
     def lookat(self, vec):
-        self.direction.x = vec.x - self.position.x
-        self.direction.y = vec.y - self.position.y
-        self.direction.normalize()
+        x = vec.x - self.position.x
+        y = vec.y - self.position.y
+        if x == 0 and y == 0:
+            self.direction = vec2(0, 0)
+        else:
+            self.direction = vec2(x, y).normalize()
 
     def cast(self, _wall):
         x1 = _wall.a.x
@@ -69,8 +72,8 @@ class Ray:
         else:
             return
 
-    def draw(self):
-        pygame.draw.line(screen, DRAW_COLOR, self.position, self.get_point(250))
+    def draw(self, length):
+        pygame.draw.line(screen, DRAW_COLOR, self.position, self.get_point(length))
 
 
 @njit(fastmath=True)
@@ -96,10 +99,11 @@ class Boundary:
     def __init__(self, a: vec2, b: vec2):
         self.a = a
         self.b = b
-        self.normal = vec2(self.a - self.b).normalize()
+        line = b - a
+        self.normal = line.rotate(90).normalize()
 
     def draw(self):
-        pygame.draw.line(screen, DRAW_COLOR, self.a, self.b)
+        pygame.draw.line(screen, DRAW_COLOR2, self.a, self.b)
 
 
 class RayCluster:
@@ -164,61 +168,67 @@ class WallRect:
 
 class LinkedRayList:
     def __init__(self, ray: Ray = None):
-        self.next: Ray or None = None
+        self.next: LinkedRayList or None = None
         self.ray = ray
 
+        self.__LOOP_LIMIT = 9999
+
     def get_len(self):
-        n = 0
-        ray = self
-        while True:
-            ray = ray.next
-            if ray is None:
+        node = self
+        i = 1
+        for i in range(1, self.__LOOP_LIMIT):
+            node = node.next
+            if node is None:
+                return i
+        return i
+
+    def get_rays(self):
+        node = self
+        rays: [Ray] = [node.ray]
+        for i in range(self.__LOOP_LIMIT):
+            node = node.next
+            if node is None:
                 break
-            n += 1
-        return n
-    
-    def lookat(self, vec):
+            rays.append(node.ray)
+        return rays
+
+    def look_at(self, vec):
         self.ray.lookat(vec)
 
-    def bounce(self, walls, depth):
+    def bounce(self, walls, depth, draw=False):
         current_node = self
-        while len(self) < depth:
-            closest = None
-            bounced_wall = None
-            record = width + height
-
+        for passes in range(depth):
             ray = current_node.ray
 
+            if not ray:
+                break
+
+            closest = None
+            record = width + height
+            bounced_wall = None
             for wall in walls:
-                pt = cast(wall.a.x, wall.a.y, wall.b.x, wall.b.y, ray.position.x, ray.position.y,
-                          ray.direction.x,
+                if wall == ray.bounced_from:
+                    continue
+
+                pt = cast(wall.a.x, wall.a.y, wall.b.x, wall.b.y, ray.position.x, ray.position.y, ray.direction.x,
                           ray.direction.y)
                 if pt:
-                    d = self.ray.position.distance_to(pt)
+                    d = ray.position.distance_to(pt)
                     if d < record:
                         record = d
                         closest = vec2(pt)
                         bounced_wall = wall
-            if closest and bounced_wall:
-                current_node.next = LinkedRayList(Ray(closest, closest.reflect(bounced_wall.normal)))
+            if closest:
+                current_node.next = LinkedRayList(
+                    Ray(closest, ray.direction.reflect(bounced_wall.normal), bounced_wall))
                 current_node = current_node.next
-                pygame.draw.line(screen, DRAW_COLOR, ray.position, closest)
+                if draw:
+                    pygame.draw.line(screen, DRAW_COLOR, ray.position, closest)
             else:
-                pygame.draw.line(screen, DRAW_COLOR, ray.position, ray.get_point(RAY_LEN))
                 current_node.next = None
+                if draw:
+                    pygame.draw.line(screen, DRAW_COLOR, ray.position, ray.get_point(RAY_LEN))
                 break
-    
-    def draw(self):
-        n = 0
-        ray = self
-        pygame.draw.line(screen, DRAW_COLOR, ray.ray.position, ray.ray.get_point(RAY_LEN))
-        while True:
-            ray = ray.next
-            if ray is None:
-                break
-            pygame.draw.line(screen, DRAW_COLOR, ray.ray.position, ray.ray.get_point(RAY_LEN))
-            n += 1
-        return n
 
     def __len__(self):
         return self.get_len()
@@ -226,14 +236,15 @@ class LinkedRayList:
 
 walls = []
 
-for i in range(10):
-    ax = random.randint(0, width)
-    ay = random.randint(0, height)
-    bx = random.randint(0, width)
-    by = random.randint(0, height)
-    walls.append(Boundary(vec2(ax, ay), vec2(bx, by)))
+walls.append(Boundary(vec2(100, 100), vec2(100, 900)))
+walls.append(Boundary(vec2(600, 100), vec2(600, 300)))
+walls.append(Boundary(vec2(100, 100), vec2(600, 100)))
 
-wr = LinkedRayList(Ray(vec2(width / 2, height / 2), 70))
+wr = LinkedRayList(Ray(vec2(width / 2, height / 2), vec2(0, 0)))
+
+MAX_RAYS = 64
+
+last_press = 0
 
 while True:
     dt = clock.tick(0)
@@ -246,9 +257,8 @@ while True:
     for wall in walls:
         wall.draw()
 
-    wr.bounce(walls, 12)
-    wr.lookat(vec2(pygame.mouse.get_pos()))
-    # wr.draw()
+    wr.look_at(vec2(pygame.mouse.get_pos()))
+    wr.bounce(walls, MAX_RAYS, True)
 
     pygame.display.flip()
     pygame.display.set_caption(str(clock.get_fps()))
